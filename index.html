@@ -366,13 +366,13 @@
  * Solbars — visar vilka barer som har sol just nu.
  *
  * 1. Hämta position (geolokalisering eller Södermalm-fallback).
- * 2. Ladda barer + byggnader via Overpass GET-fetch med tre fallback-servrar.
+ * 2. Ladda barer + byggnader via Overpass fetch() med fallback-servrar.
  * 3. För varje bar: förberäkna närliggande byggnader, raycasta mot solen.
  * 4. Tidsväljare: slider 05:00–00:00 i 15-min-steg. "Nu" = live med
  *    auto-refresh var 5:e minut; manuell tid pausar auto-refresh.
- * 5. Rendrera lista + Leaflet-markörer, sorterat sol-först.
- *
- * OBS: Filen måste öppnas i en riktig webbläsare (inte i en iframe/sandbox).
+ * 5. Molndata från Open-Meteo: tre visuella tillstånd (klart/molnigt/mulet).
+ * 6. Overpass-svar cachas i localStorage (24 h TTL).
+ * 7. Rendrera lista + Leaflet-markörer, sorterat sol-först.
  */
 
 // ── Constants ─────────────────────────────────────────────
@@ -391,7 +391,7 @@ let mapMarkers = [];
 let enrichedData = null;
 let autoRefreshId = null;
 let isManualTime = false;
-let cloudCover = null; // 0–100, null if unknown
+let cloudCover = null;
 
 // ── Time picker helpers ───────────────────────────────────
 function sliderToDate(pos) {
@@ -409,11 +409,12 @@ function sliderToLabel(pos) {
 
 // ── Geolocation ───────────────────────────────────────────
 function getLocation() {
-  return new Promise(resolve => {
+  return new Promise(function(resolve) {
     if (!navigator.geolocation) return resolve(null);
     navigator.geolocation.getCurrentPosition(
-  p => resolve({ lat: p.coords.latitude, lng: p.coords.longitude }),
-  { enableHighAccuracy: true, timeout: 12000, maximumAge: 60000 }
+      function(p) { resolve({ lat: p.coords.latitude, lng: p.coords.longitude }); },
+      function() { resolve(null); },
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 60000 }
     );
   });
 }
@@ -439,17 +440,17 @@ function cloudLabel(pct) {
 }
 
 // ── Sun helpers ───────────────────────────────────────────
-function sunPosition(lat, lng, date = new Date()) {
-  return SunCalc.getPosition(date, lat, lng);
+function sunPosition(lat, lng, date) {
+  return SunCalc.getPosition(date || new Date(), lat, lng);
 }
 
 function renderSunMeta(lat, lng, date) {
-  const pos   = sunPosition(lat, lng, date);
+  const pos = sunPosition(lat, lng, date);
   const times = SunCalc.getTimes(date, lat, lng);
   const altDeg = (pos.altitude * 180 / Math.PI).toFixed(1);
   const aziDeg = ((pos.azimuth * 180 / Math.PI + 180 + 360) % 360).toFixed(0);
   const timeStr = date.toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' });
-  const sunset  = times.sunset;
+  const sunset = times.sunset;
   const sunsetStr = isFinite(sunset)
     ? sunset.toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' })
     : '—';
@@ -478,7 +479,6 @@ async function fetchOverpass(lat, lng) {
     'https://overpass.kumi.systems/api/interpreter',
   ];
 
-  // Strategy 1: direct fetch
   for (const host of hosts) {
     try {
       const resp = await fetch(`${host}?data=${encoded}`, { method: 'GET' });
@@ -487,12 +487,11 @@ async function fetchOverpass(lat, lng) {
     } catch (e) { /* try next */ }
   }
 
-  // Strategy 2: JSONP via allorigins (works when fetch is blocked but <script> isn't)
   for (const host of hosts) {
     try {
-      return await new Promise((resolve, reject) => {
+      return await new Promise(function(resolve, reject) {
         const cb = '_ovcb_' + Date.now();
-        const timer = setTimeout(() => { cleanup(); reject(new Error('Timeout')); }, 35000);
+        const timer = setTimeout(function() { cleanup(); reject(new Error('Timeout')); }, 35000);
 
         function cleanup() {
           clearTimeout(timer);
@@ -511,7 +510,7 @@ async function fetchOverpass(lat, lng) {
         const s = document.createElement('script');
         s.id = '_ov_jsonp';
         s.src = `https://api.allorigins.win/get?url=${encodeURIComponent(target)}&callback=${cb}`;
-        s.onerror = () => { cleanup(); reject(new Error('Blockerad')); };
+        s.onerror = function() { cleanup(); reject(new Error('Blockerad')); };
         document.head.appendChild(s);
       });
     } catch (e) { /* try next */ }
@@ -522,13 +521,13 @@ async function fetchOverpass(lat, lng) {
 
 function parseOverpass(data) {
   const nodeMap = {};
-  data.elements.forEach(el => {
+  data.elements.forEach(function(el) {
     if (el.type === 'node') nodeMap[el.id] = { lat: el.lat, lng: el.lon };
   });
 
   const bars = [], buildings = [];
 
-  data.elements.forEach(el => {
+  data.elements.forEach(function(el) {
     const tags = el.tags || {};
 
     if (tags.amenity === 'bar' || tags.amenity === 'pub') {
@@ -536,29 +535,29 @@ function parseOverpass(data) {
       if (el.type === 'node') {
         lat = el.lat; lng = el.lon;
       } else if (el.type === 'way' && el.nodes) {
-        const cs = el.nodes.map(id => nodeMap[id]).filter(Boolean);
+        const cs = el.nodes.map(function(id) { return nodeMap[id]; }).filter(Boolean);
         if (!cs.length) return;
-        lat = cs.reduce((s, c) => s + c.lat, 0) / cs.length;
-        lng = cs.reduce((s, c) => s + c.lng, 0) / cs.length;
+        lat = cs.reduce(function(s, c) { return s + c.lat; }, 0) / cs.length;
+        lng = cs.reduce(function(s, c) { return s + c.lng; }, 0) / cs.length;
       } else return;
       if (lat != null && lng != null)
-        bars.push({ id: el.id, name: tags.name || (tags.amenity === 'pub' ? 'Pub' : 'Bar'), type: tags.amenity, lat, lng });
+        bars.push({ id: el.id, name: tags.name || (tags.amenity === 'pub' ? 'Pub' : 'Bar'), type: tags.amenity, lat: lat, lng: lng });
     }
 
     if (tags.building && el.type === 'way' && el.nodes) {
-      const cs = el.nodes.map(id => nodeMap[id]).filter(Boolean);
+      const cs = el.nodes.map(function(id) { return nodeMap[id]; }).filter(Boolean);
       if (cs.length >= 3) buildings.push({ id: el.id, coords: cs });
     }
   });
 
-  return { bars, buildings };
+  return { bars: bars, buildings: buildings };
 }
 
 // ── Geometry ──────────────────────────────────────────────
 
-function offsetPoint(lat, lng, azimuth, distM) {
-  const dLat = -Math.cos(azimuth) * distM / 111000;
-  const dLng = -Math.sin(azimuth) * distM / (111000 * Math.cos(lat * Math.PI / 180));
+function offsetPoint(lat, lng, azimuth, d) {
+  const dLat = -Math.cos(azimuth) * d / 111000;
+  const dLng = -Math.sin(azimuth) * d / (111000 * Math.cos(lat * Math.PI / 180));
   return { lat: lat + dLat, lng: lng + dLng };
 }
 
@@ -568,19 +567,20 @@ function distM(lat1, lng1, lat2, lng2) {
   return Math.sqrt(dx * dx + dy * dy);
 }
 
-function nearbyBuildings(barLat, barLng, allBuildings, maxDist = RAY_LENGTH_M + 20) {
-  return allBuildings.filter(b => {
-    const centLat = b.coords.reduce((s, c) => s + c.lat, 0) / b.coords.length;
-    const centLng = b.coords.reduce((s, c) => s + c.lng, 0) / b.coords.length;
+function nearbyBuildings(barLat, barLng, allBuildings, maxDist) {
+  maxDist = maxDist || RAY_LENGTH_M + 20;
+  return allBuildings.filter(function(b) {
+    const centLat = b.coords.reduce(function(s, c) { return s + c.lat; }, 0) / b.coords.length;
+    const centLng = b.coords.reduce(function(s, c) { return s + c.lng; }, 0) / b.coords.length;
     if (distM(barLat, barLng, centLat, centLng) > maxDist) return false;
 
     try {
-      const cs = b.coords.map(c => [c.lng, c.lat]);
+      const cs = b.coords.map(function(c) { return [c.lng, c.lat]; });
       if (cs[0][0] !== cs[cs.length - 1][0] || cs[0][1] !== cs[cs.length - 1][1])
-        cs.push([...cs[0]]);
+        cs.push([cs[0][0], cs[0][1]]);
       if (cs.length < 4) return true;
       return !turf.booleanPointInPolygon(turf.point([barLng, barLat]), turf.polygon([cs]));
-    } catch { return true; }
+    } catch (e) { return true; }
   });
 }
 
@@ -591,19 +591,20 @@ function raycast(barLat, barLng, azimuth, buildings) {
 
   let minDist = null;
 
-  for (const b of buildings) {
+  for (let i = 0; i < buildings.length; i++) {
     try {
-      const cs = b.coords.map(c => [c.lng, c.lat]);
+      const b = buildings[i];
+      const cs = b.coords.map(function(c) { return [c.lng, c.lat]; });
       if (cs[0][0] !== cs[cs.length - 1][0] || cs[0][1] !== cs[cs.length - 1][1])
-        cs.push([...cs[0]]);
+        cs.push([cs[0][0], cs[0][1]]);
       if (cs.length < 4) continue;
 
       const hits = turf.lineIntersect(ray, turf.polygon([cs]));
-      for (const pt of hits.features) {
-        const d = turf.distance(origin, pt, { units: 'meters' });
+      for (let j = 0; j < hits.features.length; j++) {
+        const d = turf.distance(origin, hits.features[j], { units: 'meters' });
         if (d >= MIN_HIT_DIST_M && (minDist === null || d < minDist)) minDist = d;
       }
-    } catch { /* skip malformed polygon */ }
+    } catch (e) { /* skip malformed polygon */ }
   }
 
   return minDist;
@@ -611,7 +612,8 @@ function raycast(barLat, barLng, azimuth, buildings) {
 
 // ── Sun status ────────────────────────────────────────────
 
-function computeStatus(bar, cached_nearby, date = new Date()) {
+function computeStatus(bar, cached_nearby, date) {
+  date = date || new Date();
   const pos = sunPosition(bar.lat, bar.lng, date);
 
   if (pos.altitude <= 0.017)
@@ -624,15 +626,16 @@ function computeStatus(bar, cached_nearby, date = new Date()) {
 
   const shadowAngle = Math.atan(BUILDING_H_M / dist);
   return {
-    hasSun:      pos.altitude > shadowAngle,
-    dist:        Math.round(dist),
+    hasSun: pos.altitude > shadowAngle,
+    dist: Math.round(dist),
     shadowAngleDeg: (shadowAngle * 180 / Math.PI).toFixed(1),
-    sunAltDeg:   (pos.altitude * 180 / Math.PI).toFixed(1),
-    reason:      null
+    sunAltDeg: (pos.altitude * 180 / Math.PI).toFixed(1),
+    reason: null
   };
 }
 
-function findSunChange(bar, cached_nearby, currentHasSun, fromDate = new Date()) {
+function findSunChange(bar, cached_nearby, currentHasSun, fromDate) {
+  fromDate = fromDate || new Date();
   for (let min = CHANGE_STEP_MIN; min <= CHANGE_HORIZON; min += CHANGE_STEP_MIN) {
     const t = new Date(fromDate.getTime() + min * 60000);
     const pos = sunPosition(bar.lat, bar.lng, t);
@@ -640,7 +643,7 @@ function findSunChange(bar, cached_nearby, currentHasSun, fromDate = new Date())
       return currentHasSun ? { minutes: min, type: 'solnedgång' } : null;
     }
     const dist = raycast(bar.lat, bar.lng, pos.azimuth, cached_nearby);
-    let newHasSun;
+    var newHasSun;
     if (dist === null) {
       newHasSun = true;
     } else {
@@ -674,63 +677,62 @@ function renderList(items) {
 
   const overcast = cloudCover != null && cloudCover >= 90;
 
-  const sorted = [...items].sort((a, b) => {
+  const sorted = items.slice().sort(function(a, b) {
     if (a.status.hasSun !== b.status.hasSun) return a.status.hasSun ? -1 : 1;
     if (a.change && b.change) return b.change.minutes - a.change.minutes;
     return a.bar.name.localeCompare(b.bar.name, 'sv');
   });
 
-  el.innerHTML = sorted.map(({ bar, status, change }) => {
+  el.innerHTML = sorted.map(function(item) {
+    const bar = item.bar, status = item.status, change = item.change;
     const cls = sunClass(status.hasSun);
     const icon = cls === 'no-sun' ? '●' : '○';
 
-    let sub = '';
+    var sub = '';
     if (overcast && status.hasSun) sub = 'Geometrisk sol — men mulet';
     else if (status.reason === 'natt') sub = 'Solen är under horisonten';
-    else if (status.dist) sub = `Byggnad ${status.dist} m bort · skuggvinkel ${status.shadowAngleDeg}°`;
+    else if (status.dist) sub = 'Byggnad ' + status.dist + ' m bort · skuggvinkel ' + status.shadowAngleDeg + '°';
     else sub = 'Fri sikt mot solen';
 
-    let changeText = '';
+    var changeText = '';
     if (overcast && status.hasSun) {
       changeText = '';
     } else if (change) {
-      if      (change.type === 'tappar sol')   changeText = `Skugga om ${change.minutes} min`;
-      else if (change.type === 'får sol')      changeText = `Sol om ${change.minutes} min`;
-      else if (change.type === 'solnedgång')   changeText = `Nedgång om ${change.minutes} min`;
+      if (change.type === 'tappar sol') changeText = 'Skugga om ' + change.minutes + ' min';
+      else if (change.type === 'får sol') changeText = 'Sol om ' + change.minutes + ' min';
+      else if (change.type === 'solnedgång') changeText = 'Nedgång om ' + change.minutes + ' min';
     } else if (status.hasSun) {
       changeText = 'Sol > 5 h';
-    } else {
-      changeText = '';
     }
 
-    return `<div class="bar-item ${cls}"
-                 onclick="flyTo(${bar.lat},${bar.lng})">
-      <div class="sun-dot">${icon}</div>
-      <div class="bar-info">
-        <div class="bar-name">${esc(bar.name)}</div>
-        <div class="bar-sub">${esc(sub)}</div>
-      </div>
-      <div class="bar-change">${esc(changeText)}</div>
-    </div>`;
+    return '<div class="bar-item ' + cls + '" onclick="flyTo(' + bar.lat + ',' + bar.lng + ')">' +
+      '<div class="sun-dot">' + icon + '</div>' +
+      '<div class="bar-info">' +
+        '<div class="bar-name">' + esc(bar.name) + '</div>' +
+        '<div class="bar-sub">' + esc(sub) + '</div>' +
+      '</div>' +
+      '<div class="bar-change">' + esc(changeText) + '</div>' +
+    '</div>';
   }).join('');
 }
 
 function renderMarkers(items) {
-  mapMarkers.forEach(m => leafletMap.removeLayer(m));
+  mapMarkers.forEach(function(m) { leafletMap.removeLayer(m); });
   mapMarkers = [];
 
-  const colors = {
+  var colors = {
     'sun-clear':  { stroke: '#c87f3a', fill: '#d4a86a' },
     'sun-cloudy': { stroke: '#8a6842', fill: '#a8926e' },
-    'no-sun':     { stroke: '#3d4754', fill: '#a0aab4' },
+    'no-sun':     { stroke: '#3d4754', fill: '#a0aab4' }
   };
 
-  items.forEach(({ bar, status, change }) => {
+  items.forEach(function(item) {
+    const bar = item.bar, status = item.status, change = item.change;
     const cls = sunClass(status.hasSun);
     const c = colors[cls];
-    let popup = `<strong>${esc(bar.name)}</strong><br>${cls !== 'no-sun' ? '○ Sol' : '● Skugga'}`;
-    if (status.dist) popup += `<br>Byggnad ${status.dist} m bort`;
-    if (change && cls !== 'no-sun') popup += `<br><em>${change.type} om ${change.minutes} min</em>`;
+    var popup = '<strong>' + esc(bar.name) + '</strong><br>' + (cls !== 'no-sun' ? '○ Sol' : '● Skugga');
+    if (status.dist) popup += '<br>Byggnad ' + status.dist + ' m bort';
+    if (change && cls !== 'no-sun') popup += '<br><em>' + change.type + ' om ' + change.minutes + ' min</em>';
     const m = L.circleMarker([bar.lat, bar.lng], {
       radius: 6, color: c.stroke, fillColor: c.fill, fillOpacity: 0.9, weight: 1.5
     }).bindPopup(popup).addTo(leafletMap);
@@ -744,30 +746,33 @@ window.flyTo = function(lat, lng) {
 
 // ── Update for a given time ───────────────────────────────
 
+function getSelectedDate() {
+  if (!isManualTime) return new Date();
+  return sliderToDate(parseInt(document.getElementById('time-slider').value, 10));
+}
+
 function updateForTime(date) {
   if (!enrichedData) return;
 
   renderSunMeta(userLat, userLng, date);
 
-  const items = enrichedData.map(({ bar, nb }) => {
-    const status = computeStatus(bar, nb, date);
-    const change = findSunChange(bar, nb, status.hasSun, date);
-    return { bar, status, change, nb };
+  const items = enrichedData.map(function(e) {
+    const status = computeStatus(e.bar, e.nb, date);
+    const change = findSunChange(e.bar, e.nb, status.hasSun, date);
+    return { bar: e.bar, status: status, change: change, nb: e.nb };
   });
 
-  const sunCount = items.filter(e => e.status.hasSun).length;
+  const sunCount = items.filter(function(e) { return e.status.hasSun; }).length;
   const timeStr = date.toLocaleTimeString('sv-SE', { hour: '2-digit', minute: '2-digit' });
   const statusEl = document.getElementById('status-bar');
 
   const cl = cloudLabel(cloudCover);
-  const cloudBit = cl ? ` · ${cl} ${cloudCover}%` : '';
+  const cloudBit = cl ? ' · ' + cl + ' ' + cloudCover + '%' : '';
 
   if (isManualTime) {
-    statusEl.textContent =
-      `Visar ${timeStr} · ${enrichedData.length} barer · ${sunCount} i sol${cloudBit}`;
+    statusEl.textContent = 'Visar ' + timeStr + ' · ' + enrichedData.length + ' barer · ' + sunCount + ' i sol' + cloudBit;
   } else {
-    statusEl.textContent =
-      `${enrichedData.length} barer · ${sunCount} har sol${cloudBit} · ${timeStr}`;
+    statusEl.textContent = enrichedData.length + ' barer · ' + sunCount + ' har sol' + cloudBit + ' · ' + timeStr;
   }
 
   renderList(items);
@@ -777,11 +782,11 @@ function updateForTime(date) {
 // ── Time picker logic ─────────────────────────────────────
 
 function initTimePicker() {
-  const slider  = document.getElementById('time-slider');
+  const slider = document.getElementById('time-slider');
   const display = document.getElementById('time-display');
-  const reset   = document.getElementById('time-reset');
+  const reset = document.getElementById('time-reset');
 
-  slider.addEventListener('input', () => {
+  slider.addEventListener('input', function() {
     const pos = parseInt(slider.value, 10);
     if (pos === 0) {
       isManualTime = false;
@@ -798,7 +803,7 @@ function initTimePicker() {
     }
   });
 
-  reset.addEventListener('click', () => {
+  reset.addEventListener('click', function() {
     slider.value = 0;
     isManualTime = false;
     display.textContent = 'Nu';
@@ -810,7 +815,7 @@ function initTimePicker() {
 
 function startAutoRefresh() {
   stopAutoRefresh();
-  autoRefreshId = setInterval(() => {
+  autoRefreshId = setInterval(function() {
     if (!isManualTime) updateForTime(new Date());
   }, 5 * 60 * 1000);
 }
@@ -822,14 +827,13 @@ function stopAutoRefresh() {
   }
 }
 
-// ── Overpass cache ─────────────────────────────────────────
-const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 h
+// ── Overpass cache ────────────────────────────────────────
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 function cacheKey(lat, lng) {
-  // Round to ~500 m grid cells
   const gridLat = (Math.round(lat * 200) / 200).toFixed(3);
   const gridLng = (Math.round(lng * 100) / 100).toFixed(3);
-  return `solbars_${gridLat}_${gridLng}`;
+  return 'solbars_' + gridLat + '_' + gridLng;
 }
 
 function getCached(lat, lng) {
@@ -837,23 +841,22 @@ function getCached(lat, lng) {
     const key = cacheKey(lat, lng);
     const raw = localStorage.getItem(key);
     if (!raw) return null;
-    const { ts, data } = JSON.parse(raw);
-    if (Date.now() - ts > CACHE_TTL_MS) { localStorage.removeItem(key); return null; }
-    return data;
-  } catch { return null; }
+    const obj = JSON.parse(raw);
+    if (Date.now() - obj.ts > CACHE_TTL_MS) { localStorage.removeItem(key); return null; }
+    return obj.data;
+  } catch (e) { return null; }
 }
 
 function setCache(lat, lng, data) {
   try {
-    const key = cacheKey(lat, lng);
-    localStorage.setItem(key, JSON.stringify({ ts: Date.now(), data }));
-  } catch { /* quota exceeded — ignore */ }
+    localStorage.setItem(cacheKey(lat, lng), JSON.stringify({ ts: Date.now(), data: data }));
+  } catch (e) { /* quota exceeded */ }
 }
 
 // ── Main ──────────────────────────────────────────────────
 
-let loadDebounceTimer = null;
-let userMarker = null;
+var loadDebounceTimer = null;
+var userMarker = null;
 
 async function loadDataForCenter(lat, lng) {
   const statusEl = document.getElementById('status-bar');
@@ -865,7 +868,7 @@ async function loadDataForCenter(lat, lng) {
   document.getElementById('bar-list').innerHTML =
     '<div class="loading"><div class="pulse-dots"><span></span><span></span><span></span></div><span class="loading-text">Hämtar data…</span></div>';
 
-  let rawData;
+  var rawData;
   const cached = getCached(lat, lng);
   if (cached) {
     rawData = cached;
@@ -882,31 +885,24 @@ async function loadDataForCenter(lat, lng) {
     }
   }
 
-  const { bars, buildings } = parseOverpass(rawData);
+  const parsed = parseOverpass(rawData);
 
-  // Fetch cloud cover in parallel with shadow computation
-  fetchCloudCover(lat, lng).then(cc => {
+  fetchCloudCover(lat, lng).then(function(cc) {
     cloudCover = cc;
-    // Re-render with cloud data once available
-    if (enrichedData) {
-      const date = isManualTime ? sliderToDate(parseInt(document.getElementById('time-slider').value, 10)) : new Date();
-      updateForTime(date);
-    }
+    if (enrichedData) updateForTime(getSelectedDate());
   });
 
-  statusEl.textContent = `${bars.length} barer, ${buildings.length} byggnader — beräknar skuggor…`;
+  statusEl.textContent = parsed.bars.length + ' barer, ' + parsed.buildings.length + ' byggnader — beräknar skuggor…';
   document.getElementById('bar-list').innerHTML =
     '<div class="loading"><div class="pulse-dots"><span></span><span></span><span></span></div><span class="loading-text">Beräknar skuggor…</span></div>';
 
-  await new Promise(r => setTimeout(r, 30));
+  await new Promise(function(r) { setTimeout(r, 30); });
 
-  enrichedData = bars.map(bar => {
-    const nb = nearbyBuildings(bar.lat, bar.lng, buildings);
-    return { bar, nb };
+  enrichedData = parsed.bars.map(function(bar) {
+    return { bar: bar, nb: nearbyBuildings(bar.lat, bar.lng, parsed.buildings) };
   });
 
-  const date = isManualTime ? sliderToDate(parseInt(document.getElementById('time-slider').value, 10)) : new Date();
-  updateForTime(date);
+  updateForTime(getSelectedDate());
 }
 
 async function main() {
@@ -914,10 +910,12 @@ async function main() {
 
   statusEl.textContent = 'Hämtar din position…';
   const loc = await getLocation();
-  if (loc) { userLat = loc.lat; userLng = loc.lng; }
-  else {
-  document.getElementById('status-bar').textContent = 'GPS misslyckades — visar Södermalm';
-}
+  if (loc) {
+    userLat = loc.lat;
+    userLng = loc.lng;
+  } else {
+    statusEl.textContent = 'Plats ej tillgänglig — använder Södermalm';
+  }
 
   leafletMap = L.map('map', { zoomControl: false }).setView([userLat, userLng], 15);
   L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
@@ -930,12 +928,10 @@ async function main() {
   renderSunMeta(userLat, userLng, new Date());
   initTimePicker();
 
-  // Reload data when the map is moved
-  leafletMap.on('moveend', () => {
+  leafletMap.on('moveend', function() {
     clearTimeout(loadDebounceTimer);
-    loadDebounceTimer = setTimeout(() => {
+    loadDebounceTimer = setTimeout(function() {
       const c = leafletMap.getCenter();
-      // Only reload if center moved meaningfully (>100 m)
       if (distM(userLat, userLng, c.lat, c.lng) > 100) {
         loadDataForCenter(c.lat, c.lng);
       }
@@ -946,7 +942,7 @@ async function main() {
   startAutoRefresh();
 }
 
-main().catch(err => {
+main().catch(function(err) {
   document.getElementById('status-bar').textContent = 'Fel: ' + err.message;
   document.getElementById('bar-list').innerHTML = '<div class="empty">' + err.message + '</div>';
   console.error(err);
