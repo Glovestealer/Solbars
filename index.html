@@ -414,7 +414,7 @@ function getLocation() {
     navigator.geolocation.getCurrentPosition(
       p => resolve({ lat: p.coords.latitude, lng: p.coords.longitude }),
       () => resolve(null),
-      { timeout: 6000 }
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 60000 }
     );
   });
 }
