@@ -916,7 +916,10 @@ async function main() {
   statusEl.textContent = 'Hämtar din position…';
   const loc = await getLocation();
   if (loc) { userLat = loc.lat; userLng = loc.lng; }
-  else statusEl.textContent = 'Plats ej tillgänglig — använder Södermalm';
+  else {
+  document.getElementById('status-bar').textContent = 'GPS misslyckades — visar Södermalm';
+  document.title = 'GPS MISS';
+}
 
   leafletMap = L.map('map', { zoomControl: false }).setView([userLat, userLng], 15);
   L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
