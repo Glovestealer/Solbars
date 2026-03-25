@@ -823,6 +823,34 @@ function stopAutoRefresh() {
   }
 }
 
+// ── Overpass cache ─────────────────────────────────────────
+const CACHE_TTL_MS = 24 * 60 * 60 * 1000; // 24 h
+
+function cacheKey(lat, lng) {
+  // Round to ~500 m grid cells
+  const gridLat = (Math.round(lat * 200) / 200).toFixed(3);
+  const gridLng = (Math.round(lng * 100) / 100).toFixed(3);
+  return `solbars_${gridLat}_${gridLng}`;
+}
+
+function getCached(lat, lng) {
+  try {
+    const key = cacheKey(lat, lng);
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const { ts, data } = JSON.parse(raw);
+    if (Date.now() - ts > CACHE_TTL_MS) { localStorage.removeItem(key); return null; }
+    return data;
+  } catch { return null; }
+}
+
+function setCache(lat, lng, data) {
+  try {
+    const key = cacheKey(lat, lng);
+    localStorage.setItem(key, JSON.stringify({ ts: Date.now(), data }));
+  } catch { /* quota exceeded — ignore */ }
+}
+
 // ── Main ──────────────────────────────────────────────────
 
 let loadDebounceTimer = null;
@@ -839,13 +867,20 @@ async function loadDataForCenter(lat, lng) {
     '<div class="loading"><div class="pulse-dots"><span></span><span></span><span></span></div><span class="loading-text">Hämtar data…</span></div>';
 
   let rawData;
-  try {
-    rawData = await fetchOverpass(lat, lng);
-  } catch (e) {
-    statusEl.textContent = 'Fel vid hämtning: ' + e.message;
-    document.getElementById('bar-list').innerHTML =
-      '<div class="empty">Kunde inte nå Overpass API. Försök igen om en stund.</div>';
-    return;
+  const cached = getCached(lat, lng);
+  if (cached) {
+    rawData = cached;
+    statusEl.textContent = 'Använder cachad data…';
+  } else {
+    try {
+      rawData = await fetchOverpass(lat, lng);
+      setCache(lat, lng, rawData);
+    } catch (e) {
+      statusEl.textContent = 'Fel vid hämtning: ' + e.message;
+      document.getElementById('bar-list').innerHTML =
+        '<div class="empty">Kunde inte nå Overpass API. Försök igen om en stund.</div>';
+      return;
+    }
   }
 
   const { bars, buildings } = parseOverpass(rawData);
